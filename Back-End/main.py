@@ -1,13 +1,14 @@
-from contextlib import asynccontextmanager
 import os
-import torch
-import torch.nn as nn
+from contextlib import asynccontextmanager
+
 import numpy as np
+import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModel
+from torch import nn
+from transformers import AutoModel, AutoTokenizer
 
 
 # Arquitetura do Modelo
@@ -38,10 +39,12 @@ class EssayResponse(BaseModel):
     c5_proposta_intervencao: int
     nota_final: int
 
+
 # Estado Global
 MODEL = None
 TOKENIZER = None
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 # Gerenciador de Ciclo de Vida
 @asynccontextmanager
@@ -59,7 +62,9 @@ async def lifespan(app: FastAPI):
     print(f"Carregando modelo e tokenizador em {DEVICE}...")
     TOKENIZER = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
     MODEL = EnemEssayEvaluator().to(DEVICE)
-    MODEL.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
+    MODEL.load_state_dict(
+        torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
+    )
     MODEL.eval()
     print("Modelo carregado e pronto para inferência!")
 
@@ -92,7 +97,13 @@ def avaliar_redacao(payload: EssayRequest):
     if len(payload.redacao.split()) < 30:
         raise HTTPException(
             status_code=400,
-            detail="A redação é muito curta para ser avaliada (mínimo de 30 palavras)."
+            detail="A redação é muito curta para ser avaliada (mínimo de 30 palavras).",
+        )
+
+    if MODEL is None or TOKENIZER is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modelo ainda não foi inicializado. Tente novamente em alguns instantes.",
         )
 
     combined_text = f"Tema: {payload.tema} [SEP] Redação: {payload.redacao}"
@@ -102,11 +113,13 @@ def avaliar_redacao(payload: EssayRequest):
         truncation=True,
         padding="max_length",
         max_length=512,
-        return_tensors="pt"
+        return_tensors="pt",
     ).to(DEVICE)
 
     with torch.no_grad():
-        raw_outputs = MODEL(inputs["input_ids"], inputs["attention_mask"]).cpu().numpy()[0]
+        raw_outputs = (
+            MODEL(inputs["input_ids"], inputs["attention_mask"]).cpu().numpy()[0]
+        )
 
     # Converte [0, 1] para múltiplos de 40 na escala [0, 200]
     raw_scores = raw_outputs * 200.0
@@ -119,7 +132,7 @@ def avaliar_redacao(payload: EssayRequest):
         "c3_projeto_de_texto": int(rounded[2]),
         "c4_coesao": int(rounded[3]),
         "c5_proposta_intervencao": int(rounded[4]),
-        "nota_final": int(np.sum(rounded))
+        "nota_final": int(np.sum(rounded)),
     }
 
 

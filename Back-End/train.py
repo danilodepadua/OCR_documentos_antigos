@@ -1,18 +1,24 @@
 import ast
+import logging
 import os
-import torch
-import torch.nn as nn
+
 import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
-from torch.optim import AdamW
-from transformers import AutoTokenizer, AutoModel
-from sklearn.model_selection import train_test_split
+import torch
 from sklearn.metrics import cohen_kappa_score
+from sklearn.model_selection import train_test_split
+from torch import nn
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoModel, AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 class EnemEssayEvaluator(nn.Module):
-    def __init__(self, model_name="neuralmind/bert-base-portuguese-cased", dropout_rate=0.2):
+    def __init__(
+        self, model_name="neuralmind/bert-base-portuguese-cased", dropout_rate=0.2
+    ):
         super().__init__()
         self.bert = AutoModel.from_pretrained(model_name)
         self.dropout = nn.Dropout(dropout_rate)
@@ -42,11 +48,11 @@ class EnemDataset(Dataset):
             truncation=True,
             padding="max_length",
             max_length=self.max_len,
-            return_tensors="pt"
+            return_tensors="pt",
         )
         item = {
             "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0)
+            "attention_mask": encoding["attention_mask"].squeeze(0),
         }
         if self.scores is not None:
             # Escala normalizada [0, 1]
@@ -71,10 +77,13 @@ def extract_prompt_text(val):
             paragraphs = ast.literal_eval(s)
             if isinstance(paragraphs, list) and paragraphs:
                 keywords = ("tema", "dissertação", "redija", "ponto de vista")
-                cmd = next((p for p in paragraphs if any(k in p.lower() for k in keywords)), None)
+                cmd = next(
+                    (p for p in paragraphs if any(k in p.lower() for k in keywords)),
+                    None,
+                )
                 s = cmd if cmd else " ".join(str(p) for p in paragraphs)
-        except Exception:
-            pass
+        except (SyntaxError, ValueError) as exc:
+            logger.warning("Não foi possivel serializar o prompt: %s", exc)
     # Normaliza espaços e limita a 300 caracteres para sobrar espaço na janela de 512 tokens para a redação
     return " ".join(s.split())[:300]
 
@@ -102,7 +111,9 @@ def evaluate(model, loader, criterion, device):
     y_true_rounded = (targets_arr * 200.0).astype(int)
 
     qwk_scores = [
-        cohen_kappa_score(y_true_rounded[:, i], y_pred_rounded[:, i], weights="quadratic")
+        cohen_kappa_score(
+            y_true_rounded[:, i], y_pred_rounded[:, i], weights="quadratic"
+        )
         for i in range(5)
     ]
     return avg_loss, qwk_scores
@@ -112,14 +123,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MODEL_NAME = "neuralmind/bert-base-portuguese-cased"
 
-    #Carregamento e junção das redações (4570) com os temas (86)
+    # Carregamento e junção das redações (4570) com os temas (86)
     df = pd.read_csv("essay-br.csv")
     prompts_df = pd.read_csv("prompts.csv")
 
     prompts_df["tema_prompt"] = prompts_df["description"].apply(extract_prompt_text)
-    df = df.merge(prompts_df[["id", "tema_prompt"]], left_on="prompt", right_on="id", how="left")
+    df = df.merge(
+        prompts_df[["id", "tema_prompt"]], left_on="prompt", right_on="id", how="left"
+    )
 
-    #Conversão das colunas serializadas para texto contínuo e matriz (4570, 5)
+    # Conversão das colunas serializadas para texto contínuo e matriz (4570, 5)
     X_texts = df["essay"].apply(lambda x: "\n".join(ast.literal_eval(x))).values
     X_themes = df["tema_prompt"].fillna("").astype(str).values
     y = np.array(df["competence"].apply(ast.literal_eval).tolist(), dtype=np.float32)
@@ -157,7 +170,9 @@ def main():
     best_val_loss = float("inf")
     os.makedirs("./saved_model", exist_ok=True)
 
-    print(f"Iniciando treinamento em: {device} | Treino: {len(train_dataset)} | Val: {len(val_dataset)} | Teste: {len(test_dataset)}")
+    print(
+        f"Iniciando treinamento em: {device} | Treino: {len(train_dataset)} | Val: {len(val_dataset)} | Teste: {len(test_dataset)}"
+    )
 
     for epoch in range(epochs):
         model.train()
@@ -176,8 +191,12 @@ def main():
 
         avg_val_loss, qwk_scores = evaluate(model, val_loader, criterion, device)
 
-        print(f"Época {epoch + 1}/{epochs} | Train Loss: {train_loss / len(train_loader):.4f} | Val Loss: {avg_val_loss:.4f}")
-        print(f"QWK Médio Validação: {np.mean(qwk_scores):.4f} (C1-C5: {[round(s, 4) for s in qwk_scores]})")
+        print(
+            f"Época {epoch + 1}/{epochs} | Train Loss: {train_loss / len(train_loader):.4f} | Val Loss: {avg_val_loss:.4f}"
+        )
+        print(
+            f"QWK Médio Validação: {np.mean(qwk_scores):.4f} (C1-C5: {[round(s, 4) for s in qwk_scores]})"
+        )
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -186,11 +205,15 @@ def main():
             print("-> Novo melhor modelo salvo em ./saved_model")
 
     # Avaliação do modelo
-    model.load_state_dict(torch.load("./saved_model/model_weights.pt", map_location=device))
+    model.load_state_dict(
+        torch.load("./saved_model/model_weights.pt", map_location=device)
+    )
     test_loss, test_qwk = evaluate(model, test_loader, criterion, device)
     print("\n--- RESULTADO FINAL NO CONJUNTO DE TESTE ---")
     print(f"Test Loss (MSE): {test_loss:.4f}")
-    print(f"QWK Médio Teste: {np.mean(test_qwk):.4f} (C1-C5: {[round(s, 4) for s in test_qwk]})")
+    print(
+        f"QWK Médio Teste: {np.mean(test_qwk):.4f} (C1-C5: {[round(s, 4) for s in test_qwk]})"
+    )
 
 
 if __name__ == "__main__":
