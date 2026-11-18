@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from typing import List
 
 import numpy as np
 import torch
@@ -38,6 +39,7 @@ class EssayResponse(BaseModel):
     c4_coesao: int
     c5_proposta_intervencao: int
     nota_final: int
+    feedback: List[str]
 
 
 # Estado Global
@@ -87,6 +89,86 @@ app.add_middleware(
 )
 
 
+def gerar_diagnostico(redacao: str, notas: dict, model, tokenizer, device, tema: str):
+    feedbacks = []
+
+    # Regras diagnósticas baseadas nas notas previstas por competência
+    criterios = {
+        "c1_norma_culta": (
+            notas["c1_norma_culta"],
+            "Competência 1 (Norma Culta): Foram detectados desvios gramaticais, de pontuação, acentuação ou escolhas vocabulares informais. Revise a concordância verbal/nominal e evite marcas de oralidade.",
+        ),
+        "c2_compreensao_tema": (
+            notas["c2_compreensao_tema"],
+            "Competência 2 (Tema e Estrutura): A abordagem ao tema está superficial ou falta repertório sociocultural legitimado (citações, dados históricos, filósofos ou leis) bem articulado à discussão.",
+        ),
+        "c3_projeto_de_texto": (
+            notas["c3_projeto_de_texto"],
+            "Competência 3 (Argumentação): Há falhas no projeto de texto. Desenvolva melhor a relação de causa e consequência dos seus argumentos, evitando afirmações sem comprovação.",
+        ),
+        "c4_coesao": (
+            notas["c4_coesao"],
+            "Competência 4 (Coesão): Faltam conectivos interparágrafos (ex: 'Nesse sentido', 'Ademais', 'Portanto') ou há repetição excessiva de palavras ao longo dos períodos.",
+        ),
+        "c5_proposta_intervencao": (
+            notas["c5_proposta_intervencao"],
+            "Competência 5 (Proposta de Intervenção): A conclusão está incompleta. Garanta a presença explícita dos 5 elementos: Agente, Ação, Meio/Modo, Efeito e Detalhamento.",
+        ),
+    }
+
+    for nota, mensagem in criterios.values():
+        if nota <= 120:
+            feedbacks.append(f"[Atenção - {nota}/200] {mensagem}")
+        elif nota == 160:
+            feedbacks.append(f"[Bom, mas pode melhorar - 160/200] {mensagem}")
+
+    # Análise de Impacto por Parágrafo
+    paragrafos = [p.strip() for p in redacao.split("\n") if p.strip()]
+    if len(paragrafos) >= 2:
+        nota_base = notas["nota_final"]
+        impactos = []
+
+        for i, p in enumerate(paragrafos):
+            texto_sem_p = "\n".join(paragrafos[:i] + paragrafos[i + 1 :])
+            inputs = tokenizer(
+                f"Tema: {tema} [SEP] Redação: {texto_sem_p}",
+                truncation=True,
+                padding="max_length",
+                max_length=512,
+                return_tensors="pt",
+            ).to(device)
+            with torch.no_grad():
+                out = (
+                    model(inputs["input_ids"], inputs["attention_mask"])
+                    .cpu()
+                    .numpy()[0]
+                )
+            nota_sem_p = int(np.sum(np.round(np.clip(out * 200.0, 0, 200) / 40.0) * 40))
+
+            # Verifica qual parágrafo causou a maior queda na nota final ao ser removido
+            queda = nota_base - nota_sem_p
+            impactos.append((i + 1, p[:80], queda))
+
+        # Ordena os impactos do maior para o menor (maior queda = maior impacto)
+        impactos.sort(key=lambda x: x[2], reverse=True)
+
+        # Identifica o parágrafo com menor impacto (ou seja, que menos contribuiu para a nota final)
+        mais_fraco = impactos[-1]
+
+        feedbacks.append(
+            f'[Análise de Parágrafo] O {mais_fraco[0]}º parágrafo ("{mais_fraco[1]}...") '
+            f"apresentou menor impacto na pontuação da rede neural (variação de {mais_fraco[2]} pts). "
+            f"Recomenda-se enriquecer a argumentação ou o detalhamento deste trecho."
+        )
+
+    if not len([f for f in feedbacks if "Atenção" in f or "Bom" in f]):
+        feedbacks.append(
+            "Excelente desempenho! Todas as competências atingiram a nota máxima."
+        )
+
+    return feedbacks
+
+
 @app.get("/")
 def health_check():
     return {"status": "online", "device": str(DEVICE)}
@@ -126,7 +208,7 @@ def avaliar_redacao(payload: EssayRequest):
     clipped = np.clip(raw_scores, 0, 200)
     rounded = (np.round(clipped / 40.0) * 40).astype(int)
 
-    return {
+    notas = {
         "c1_norma_culta": int(rounded[0]),
         "c2_compreensao_tema": int(rounded[1]),
         "c3_projeto_de_texto": int(rounded[2]),
@@ -134,6 +216,10 @@ def avaliar_redacao(payload: EssayRequest):
         "c5_proposta_intervencao": int(rounded[4]),
         "nota_final": int(np.sum(rounded)),
     }
+    feedback = gerar_diagnostico(
+        payload.redacao, notas, MODEL, TOKENIZER, DEVICE, payload.tema
+    )
+    return {**notas, "feedback": feedback}
 
 
 if __name__ == "__main__":
