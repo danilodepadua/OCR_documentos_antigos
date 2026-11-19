@@ -1,5 +1,16 @@
-# OCR_documentos_antigos
-Aplicação de OCR em: Registro Civil do estado (Pernambuco pelo family search) ou Arquivos de Periódicos (Pela Hemeroteca) ou avaliação de redação (Kaggle?)
+# Correção de Redação
+Site de correção de redação, que consiste em pegar uma redação não avaliada previamente e dar nota para ela em diferentes categorias.
+
+## Integrantes
+- Danilo de Pádua
+- Pedro Henrique
+- Sonael
+
+## Dataset
+`https://github.com/rafaelanchieta/essay`
+
+## Modelo
+`neuralmind/bert-base-portuguese-cased`
 
 ## Modelo treinado
 
